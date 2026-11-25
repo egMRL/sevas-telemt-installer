@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-version=1.0.0
+version=1.0.1
 telemt_version=3.5.17
 upstream_sha=ec61f3ec917a1a20b5ac6725cf60cb35884e44c882524d63cc65bd7266b06a8f
 config_file=/etc/telemt/telemt.toml
@@ -164,33 +164,50 @@ require_native() {
         { fail 'Служба Telemt использует другой конфиг.'; return 1; }
 }
 
-ready() {
-    local api
-    api=$(config api) || return 1
-    local port
+started() {
+    local port pid listeners
     port=$(config port) || return 1
-    systemctl is-active --quiet telemt.service &&
-        [[ -n $(ss -Hltnp "( sport = :$port )" | grep -F '"telemt"') ]] || return 1
-    if [[ $api == on ]]; then
-        timeout 8 "$telemt_bin" healthcheck --mode ready "$config_file" >/dev/null 2>&1
-    fi
+    systemctl is-active --quiet telemt.service || return 1
+    pid=$(systemctl show -p MainPID --value telemt.service) || return 1
+    [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+    listeners=$(ss -Hltnp "( sport = :$port )") || return 1
+    [[ $listeners == *"pid=$pid,"* ]]
 }
 
-wait_ready() {
-    local attempt
-    for attempt in 1 2 3 4 5; do
-        if ready; then return 0; fi
-        if [[ $attempt != 5 ]]; then sleep 1; fi
+api_ready() {
+    local api
+    api=$(config api) || return 1
+    [[ $api != on ]] ||
+        timeout 8 "$telemt_bin" healthcheck --mode ready "$config_file" >/dev/null 2>&1
+}
+
+wait_for() {
+    local deadline=$((SECONDS + $1))
+    shift
+    until "$@"; do
+        (( SECONDS < deadline )) || return 1
+        sleep 1
     done
-    return 1
+}
+
+report_api_health() {
+    local api
+    api=$(config api) || return 1
+    [[ $api == on ]] || return 0
+    if api_ready; then
+        say 'API Telemt подтвердил готовность.'
+    else
+        say 'API Telemt пока не подтвердил готовность. Проверьте журнал и подключение в Telegram.' >&2
+        return 1
+    fi
 }
 
 status() {
     require_native || return 1
-    "$telemt_bin" --version
     config status || return 1
-    if ready; then
-        say 'Служба запущена, локальный порт слушает.'
+    if started; then
+        say 'Служба запущена и слушает настроенный TCP-порт.'
+        report_api_health
     else
         fail 'Проверка готовности не прошла. Посмотрите пункт «Журнал».'
     fi
@@ -223,7 +240,7 @@ upstream() (
 
 install_proxy() (
     lock || return 1
-    local port domain saved='' was_active=0 updating=0 output
+    local port domain saved='' was_active=0 was_ready=0 updating=0 output
     if [[ -e $unit_file || -e $telemt_bin ]]; then
         require_native || return 1
         updating=1
@@ -237,7 +254,10 @@ install_proxy() (
         cp -a -- "$config_file" "$saved/" || return 1
         if [[ $updating == 1 ]]; then
             confirm "Установить Telemt $telemt_version поверх текущей версии с коротким перезапуском?" || return 0
-            if systemctl is-active --quiet telemt.service; then was_active=1; fi
+            if systemctl is-active --quiet telemt.service; then
+                was_active=1
+                if started && api_ready; then was_ready=1; fi
+            fi
             cp -a -- "$unit_file" "$telemt_bin" "$saved/" || return 1
         fi
     else
@@ -258,8 +278,16 @@ install_proxy() (
     output=$(mktemp) || return 1
     trap 'rm -f -- "$output"' EXIT
     say "Устанавливаю Telemt $telemt_version…"
-    if upstream "$telemt_version" --port "$port" --domain "$domain" >"$output" 2>&1 && wait_ready; then
+    if ! upstream "$telemt_version" --port "$port" --domain "$domain" >"$output" 2>&1; then
+        say 'Официальный установщик Telemt завершился с ошибкой.' >&2
+        tail -n 16 "$output" | sed -E 's/[[:xdigit:]]{32,}/[скрыто]/g' >&2
+    elif ! wait_for 20 started; then
+        say "Служба Telemt не начала слушать $port/tcp за 20 секунд. Проверьте пункт «Журнал»." >&2
+    elif [[ $was_ready == 1 ]] && ! wait_for 45 api_ready; then
+        say 'До обновления Telemt был готов, но после обновления API не подтвердил готовность.' >&2
+    else
         say "Telemt запущен на $port/tcp. Ссылку можно открыть в пункте 4."
+        report_api_health || true
         say 'Если сервер закрыт файрволом, проверьте входящий TCP в панели хостинга.'
         return 0
     fi
@@ -307,7 +335,7 @@ change_tag() (
         chmod --reference="$config_file" -- "$staged" || return 1
     if systemctl is-active --quiet telemt.service; then was_active=1; fi
     mv -fT -- "$staged" "$config_file" || return 1
-    if [[ $was_active == 0 ]] || { systemctl restart telemt.service && wait_ready; }; then
+    if [[ $was_active == 0 ]] || { systemctl restart telemt.service && wait_for 20 started && wait_for 45 api_ready; }; then
         say "Настройка сохранена. Резервная копия: $saved"
         if [[ $was_active == 0 ]]; then say 'Настройка вступит в силу при следующем запуске службы.'; fi
         return 0
@@ -359,7 +387,7 @@ sponsor() {
 
 restart_proxy() (
     lock && require_native || return 1
-    systemctl restart telemt.service && wait_ready && status
+    systemctl restart telemt.service && wait_for 20 started && status
 )
 
 remove_proxy() (
