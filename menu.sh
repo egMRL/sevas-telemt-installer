@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-version=1.0.1
+version=1.0.2
 telemt_version=3.5.17
 upstream_sha=ec61f3ec917a1a20b5ac6725cf60cb35884e44c882524d63cc65bd7266b06a8f
 config_file=/etc/telemt/telemt.toml
@@ -225,6 +225,14 @@ restore_file() (
     cp -a -- "$source" "$staged" && mv -fT -- "$staged" "$target"
 )
 
+prepare_upstream() {
+    # On systemd the unit supplies the capabilities, so the extra setcap package is unnecessary.
+    sed -i -E \
+        -e 's/curl -fsSL "\$1" -o "\$2"/curl --connect-timeout 15 --max-time 60 --speed-limit 1024 --speed-time 20 -fsSL "$1" -o "$2"/' \
+        -e 's/if ! command -v setcap /if [ "$(get_svc_mgr)" != "systemd" ] \&\& ! command -v setcap /' \
+        "$1"
+}
+
 upstream() (
     local installer digest
     installer=$(mktemp) || return 1
@@ -233,14 +241,26 @@ upstream() (
         "https://raw.githubusercontent.com/telemt/telemt/$telemt_version/install.sh" -o "$installer" || return 1
     digest=$(sha256sum "$installer") || return 1
     [[ "${digest%% *}" == "$upstream_sha" ]] || { fail 'Контрольная сумма установщика Telemt отличается.'; return 1; }
+    prepare_upstream "$installer" || return 1
     env -u VERSION -u TLS_DOMAIN -u SERVER_PORT -u SUDO \
         REPO=telemt/telemt BIN_NAME=telemt INSTALL_DIR=/bin CONFIG_DIR=/etc/telemt \
         CONFIG_FILE="$config_file" WORK_DIR=/opt/telemt /bin/sh "$installer" --lang ru "$@"
 )
 
+show_install_progress() {
+    sed -u -n -E '
+        /(tg:\/\/proxy|https:\/\/t\.me\/proxy)\?/d
+        s/[[:xdigit:]]{32,}/[скрыто]/g
+        /^(\[INFO\] )?>>> /p
+        /^\[(ERROR|WARNING)\]/p
+        /^curl: \([0-9]+\)/p
+        /^Ошибка:/p
+    '
+}
+
 install_proxy() (
     lock || return 1
-    local port domain saved='' was_active=0 was_ready=0 updating=0 output
+    local port domain saved='' was_active=0 was_ready=0 updating=0
     if [[ -e $unit_file || -e $telemt_bin ]]; then
         require_native || return 1
         updating=1
@@ -275,15 +295,12 @@ install_proxy() (
         return 1
     fi
 
-    output=$(mktemp) || return 1
-    trap 'rm -f -- "$output"' EXIT
-    say "Устанавливаю Telemt $telemt_version…"
-    if ! upstream "$telemt_version" --port "$port" --domain "$domain" >"$output" 2>&1; then
+    say "Загружаю установщик Telemt $telemt_version с GitHub…"
+    if ! upstream "$telemt_version" --port "$port" --domain "$domain" 2>&1 | show_install_progress; then
         say 'Официальный установщик Telemt завершился с ошибкой.' >&2
-        tail -n 16 "$output" | sed -E 's/[[:xdigit:]]{32,}/[скрыто]/g' >&2
-    elif ! wait_for 20 started; then
+    elif ! { say "Проверяю запуск службы на $port/tcp (до 20 секунд)…"; wait_for 20 started; }; then
         say "Служба Telemt не начала слушать $port/tcp за 20 секунд. Проверьте пункт «Журнал»." >&2
-    elif [[ $was_ready == 1 ]] && ! wait_for 45 api_ready; then
+    elif [[ $was_ready == 1 ]] && ! { say 'Проверяю готовность API после обновления…'; wait_for 45 api_ready; }; then
         say 'До обновления Telemt был готов, но после обновления API не подтвердил готовность.' >&2
     else
         say "Telemt запущен на $port/tcp. Ссылку можно открыть в пункте 4."
