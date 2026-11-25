@@ -8,11 +8,13 @@
 
 ```bash
 installer="$(mktemp)" &&
-  curl -fsSL 'https://raw.githubusercontent.com/egMRL/sevas-telemt-installer/4c041adbfe20c176ece03ed905a699cbfde52a19/menu.sh' -o "$installer" &&
+  curl -fsSL 'https://raw.githubusercontent.com/egMRL/sevas-telemt-installer/f4855a0e5e1ce77f216926283e475a02d361f587/menu.sh' -o "$installer" &&
   sudo bash "$installer" setup
 ```
 
 Если вы вошли как `root`, выполните последний шаг без `sudo`. Для повторного вызова введите `menu`. Если имя уже занято, используйте `sevas-telemt-menu`.
+
+Если Telemt уже установлен, команда обновит меню. Выберите **2. Проверить статус**. На новом сервере для установки Telemt выберите **1. Установить или обновить**.
 
 ## Управление прокси
 
