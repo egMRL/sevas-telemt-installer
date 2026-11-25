@@ -8,7 +8,7 @@
 
 ```bash
 installer="$(mktemp)" &&
-  curl -fsSL 'https://raw.githubusercontent.com/egMRL/sevas-telemt-installer/v1.0.0/menu.sh' -o "$installer" &&
+  curl -fsSL 'https://raw.githubusercontent.com/egMRL/sevas-telemt-installer/4c041adbfe20c176ece03ed905a699cbfde52a19/menu.sh' -o "$installer" &&
   sudo bash "$installer" setup
 ```
 
